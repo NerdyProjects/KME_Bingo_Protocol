@@ -1,5 +1,5 @@
 import os
-from enum import Enum
+from enum import IntEnum, Enum
 import struct
 import time
 import socket
@@ -68,6 +68,22 @@ class DrivingMode(Enum):
     ECO = 1
     SPORT = 2
 
+class RegisterAddress(IntEnum):
+    VERSION = 0x01
+    STATUS = 0x02
+    SETTINGS_1 = 0x03
+    SETTINGS_2 = 0x04
+    OPTION_1 = 0x06
+    LAMBDA_TPS = 0x07
+    LAMBDA_NEUTRAL = 0x08
+    LAMBDA_DELAY = 0x09
+    OPTION_2 = 0x0A
+    ENGINE_TEMP_MIN = 0x10
+    IAP = 0x13
+    RPM_TOP_LIMIT_L = 0x1C
+    RPM_TOP_LIMIT_H = 0x1D
+    EMERGENCY_LPG_TIME = 0x26
+
 
 class Memory:
     require_minimum_engine_temperature = False
@@ -83,23 +99,67 @@ class Memory:
     driving_mode = DrivingMode.NORMAL
     control_panel_has_gas_level_indication = False
 
-    minimum_engine_temperature = engine_temp_to_val(30)
-    lambda_type = LambdaType.V08_16
-    tps_type = TPSType.LIN_0_5
-    lambda_neutral = voltage_to_val(1.20)
-    lambda_delay = seconds_to_lambda_delay(10)
-    emergency_lpg_time = 10
+    registers = {
+            RegisterAddress.VERSION : 'get_version',
+            RegisterAddress.STATUS: 'get_status',
+            RegisterAddress.SETTINGS_1: 'get_settings_1',
+            RegisterAddress.SETTINGS_2: 'get_settings_2',
+            RegisterAddress.OPTION_1: 'set_option',
+            RegisterAddress.OPTION_2: 'set_emulation_type'
+            }
 
-    iap = 32
+    memory = {
+            RegisterAddress.LAMBDA_TPS: 0,
+            RegisterAddress.LAMBDA_NEUTRAL: 0,
+            RegisterAddress.LAMBDA_DELAY: 1,
+            RegisterAddress.ENGINE_TEMP_MIN: 0,
+            RegisterAddress.IAP: 32,
+            RegisterAddress.RPM_TOP_LIMIT_L: 0x73,
+            RegisterAddress.RPM_TOP_LIMIT_H: 0x09,
+            RegisterAddress.EMERGENCY_LPG_TIME: 0,
+            }
+
+    def get_version(self, v):
+        return [0x4b, # unknown
+            0x63 # upper nibble lower bytes describe major version, lower nibble describes minor version: 4.03
+            ]
+
+    def get_settings_2(self, v):
+        return [0x28,
+                0x28,
+                0xc8,
+                0x1e,
+                0x70,
+                0x17,
+                0x06,
+                0xd4,
+                0x30,
+                0x1e,
+                0xc4,
+                0x09,
+                0xf5,
+                0x32
+                ]
+
+    lambda_delay = seconds_to_lambda_delay(10)
 
     tps_status = voltage_to_val(1.5)
     lambda_status = voltage_to_val(0.7)
     stepper_position = 80
     rpm = 800
-    rpm_top_limit = 6000
-    rpm_top_limit_temp
 
-    def getOption(self):
+    def setRegister(self, reg, v):
+        if reg in self.registers:
+            return getattr(self, self.registers[reg])(v)
+
+        if reg in self.memory:
+            self.memory[reg] = v
+            return [v]
+        else:
+            print("Write to unknown memory address ", reg, ": ", v)
+            return [0]
+
+    def get_option(self):
         option = 0
         if self.require_minimum_engine_temperature:
             option += 2
@@ -118,9 +178,9 @@ class Memory:
         elif self.level_sensor_type == LevelSensorType.NINETY_OHMS:
             option += 128
 
-        return [option]
+        return option
 
-    def setOption(self, option):
+    def set_option(self, option):
         self.require_minimum_engine_temperature = bool(option & 2)
         self.use_learned_iap = bool(option & 4)
         self.stepper_jump_to_iap = bool(option & 8)
@@ -129,16 +189,17 @@ class Memory:
         self.rpm_top_limit_enabled = bool(option & 64)
         level_sensor = ((option & 128) >> 7) | (option & 1)
         self.level_sensor_type = LevelSensorType(level_sensor)
+        return [self.get_option()]
 
-    def getEmulationType(self):
+    def get_emulation_type(self):
         option = self.lambda_emulation_type.value |\
         int(self.rpm_signal_low_level) << 2 |\
         int(self.allow_emergency_engine_start) << 3 |\
         self.driving_mode.value << 4 |\
         self.control_panel_has_gas_level_indication << 7
-        return [option]
+        return option
 
-    def setEmulationType(self, emulationType):
+    def set_emulation_type(self, emulationType):
         self.lambda_emulation_type = LambdaEmulation(emulationType & 0x03)
         self.rpm_signal_low_level = bool(emulationType & 0x04)
         self.allow_emergency_engine_start = bool(emulationType & 0x08)
@@ -146,74 +207,30 @@ class Memory:
         self.control_panel_has_gas_level_indication = bool(emulationType & 0x80)
         if emulationType & 0x40:
             print('received set bit in unknown emulation type byte')
+        return [self.get_emulation_type()]
 
-    def getLambdaTpsType(self):
-        return [(self.lambda_type.value << 4) | (self.tps_type.value)]
-
-    def setLambdaTpsType(self, val):
-        self.lambda_type = LambdaType(val >> 4)
-        self.tps_type = TPSType(val & 0x0F)
-
-    def getMinimumEngineTemperature(self):
-        return [self.minimum_engine_temperature]
-
-    def setMinimumEngineTemperature(self, v):
-        # original software allows 0x5e to 0xd0
-        if (v > 0) and (v < 255):
-            self.minimum_engine_temperature = v
-
-    def setLambdaNeutralPoint(self, v):
-        self.lambda_neutral = v
-        print('lambda neutral: ', val_to_voltage(v), 'V')
-
-    def getLambdaNeutralPoint(self):
-        return [self.lambda_neutral]
-
-    # time in 1/10 seconds
-    def setEmergencyLpgTime(self, v):
-        if (v > 0) and (v < 100):
-            self.emergency_lpg_time = v
-
-    def getEmergencyLpgTime(self):
-        return [self.emergency_lpg_time]
-
-    def getIap(self):
-        return [self.iap]
-
-    def setIap(self, v):
-        self.iap = v
-
-    def getLambdaDelay(self):
-        return [round(self.lambda_delay / 5)]
-
-    def setLambdaDelay(self, v):
-        if (v > 0) and (v < 255):
-            self.lambda_delay = v * 5
-
-    def getSettings(self):
-        res = self.getOption()
-        res.extend(self.getLambdaTpsType())
-        res.extend(
-            [
-            self.lambda_neutral,
-            0x01,
-            *self.getEmulationType(),
-            0x0b,
-            0x0b,
-            self.emergency_lpg_time,
-            0x18,
-            0x0a,
-            self.minimum_engine_temperature,
-            0x05
-            ])
+    def get_settings_1(self, v):
+        res =  [self.get_option(),
+                self.memory[RegisterAddress.LAMBDA_TPS],
+                self.memory[RegisterAddress.LAMBDA_NEUTRAL],
+                self.memory[RegisterAddress.LAMBDA_DELAY],
+                self.get_emulation_type(),
+                0x0B,
+                0x0B,
+                self.memory[RegisterAddress.EMERGENCY_LPG_TIME],
+                0x18,
+                0x0A,
+                self.memory[RegisterAddress.ENGINE_TEMP_MIN],
+                0x05
+                ]
         return res
 
-    def getStatus(self):
+    def get_status(self, v):
         res = [
                 self.tps_status, # TPS voltage in ADC steps 0..5V
                 self.lambda_status, # lambda voltage in ADC steps 0..5V
                 self.stepper_position, # stepper position 0..256
-                self.iap, # initialisation of stepper position
+                self.memory[RegisterAddress.IAP],
                 *rpm_to_16bit_val(self.rpm), # 2 byte rpm
                 0x8c, # bit 4/5/6/7: TPS field 1-4 bit 6: bit 3: Ignition state bit 0/1/2: toggles lambda sensor color (yellow on 0,2,3, green on 1/7)
                 0x10,
@@ -221,69 +238,52 @@ class Memory:
                ]
         return res
 
+    def getLambdaType(self):
+        return LambdaType(self.memory[RegisterAddress.LAMBDA_TPS] >> 4)
 
-registers = {
-        2: {
-            'getter': 'getStatus'
-            },
-        3: {
-            'getter': 'getSettings'
-            },
-        6: {
-            'setter': 'setOption',
-            'getter': 'getOption'
-            },
-        0x07: {
-            'setter': 'setLambdaTpsType',
-            'getter': 'getLambdaTpsType'
-            },
-        0x08: {
-            'setter': 'setLambdaNeutralPoint',
-            'getter': 'getLambdaNeutralPoint'
-            },
-        0x0a: {
-            'setter': 'setEmulationType',
-            'getter': 'getEmulationType'
-            },
-        0x10: {
-            'setter': 'setMinimumEngineTemperature',
-            'getter': 'getMinimumEngineTemperature'
-            },
-        0x13: {
-            'setter': 'setIap',
-            'getter': 'getIap'
-            },
-        0x26: {
-            'setter': 'setEmergencyLpgTime',
-            'getter': 'getEmergencyLpgTime',
-            },
-        0x1c: {
-            'setter': 'setRpmTopLimit',
-            'getter': 'getRpmTopLimit',
-            },
-        }
+    def getTpsType(self):
+        return TPSType(self.memory[RegisterAddress.LAMBDA_TPS] & 0x0F)
+
+    def setLambdaType(self, lambda_type):
+        self.memory[RegisterAddress.LAMBDA_TPS] = (self.memory[RegisterAddress.LAMBDA_TPS] & 0x0F) | (lambda_type.value << 4)
+
+    def setTPSType(self, tps_type):
+        self.memory[RegisterAddress.LAMBDA_TPS] = (self.memory[RegisterAddress.LAMBDA_TPS] & 0xF0) | (tps_type.value & 0x0F)
+
+    def setMinimumEngineTemperature(self, temperature):
+        # original software allows 0x5e to 0xd0
+        # Range not tested!
+        self.memory[RegisterAddress.ENGINE_TEMP_MIN] = engine_temp_to_val(temperature)
+
+    def getMinimumEngineTemperature(self):
+        return val_to_engine_temp(self.memory[RegisterAddress.ENGINE_TEMP_MIN])
+
+    def setLambdaNeutralVoltage(self, voltage):
+        self.memory[RegisterAddress.LAMBDA_NEUTRAL] = voltage_to_val(voltage)
+
+    def getLambdaNeutralVoltage(self):
+        return val_to_voltage(self.memory[RegisterAddress.LAMBDA_NEUTRAL])
+
+    def setEmergencyLpgTime(self, time):
+        # original software allows 0.1-10.0 seconds)
+        self.memory[RegisterAddress.EMERGENCY_LPG_TIME] = round(time * 10)
+
+    def getEmergencyLpgTime(self):
+        return self.memory[RegisterAddress.EMERGENCY_LPG_TIME] / 10
+
+    def getIap(self):
+        return self.memory[RegisterAddress.IAP]
+
+    def setIap(self, iap):
+        self.memory[RegisterAddress.IAP] = iap
+
+    def getLambdaDelay(self):
+        return self.memory[RegisterAddress.LAMBDA_DELAY] * 5
+
+    def setLambdaDelay(self, delay):
+        self.memory[RegisterAddress.LAMBDA_DELAY] = round(delay / 5)
 
 
-responses = {
-        1: [0x4b, # unknown
-            0x63 # upper nibble lower bytes describe major version, lower nibble describes minor version: 4.03
-            ],
-        4: [0x28,
-            0x28,
-            0xc8,
-            0x1e,
-            0x70,
-            0x17,
-            0x06,
-            0xd4,
-            0x30,
-            0x1e,
-            0xc4,
-            0x09,
-            0xf5,
-            0x32
-            ]
-        }
 class ParserState(Enum):
     WAIT_START = 1
     READ_REG = 2
@@ -301,17 +301,7 @@ def create_response(data):
     return bytes(res)
 
 def handle_data(register, value, memory):
-    if register in responses:
-        return create_response(responses[register])
-    elif register in registers:
-        r = registers[register]
-        if 'setter' in r:
-            getattr(memory, r['setter'])(value)
-        return create_response(getattr(memory, r['getter'])())
-
-    else:
-        print('got write to unknown reg ', hex(register), ' := ', hex(value))
-    return b''
+    return create_response(memory.setRegister(register, value))
 
 #m, s = os.openpty()
 #print('Slave terminal: ', os.ttyname(s))
